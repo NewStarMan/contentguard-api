@@ -41,14 +41,14 @@ image_response = requests.post("https://api-url/api/moderate/image",
 
 ```
 
-Security
+### Security
 
 All API keys are securely hashed
 Rate limiting: 60 requests/minute per IP
 Request logging and monitoring
 Admin-only key generation
 
-Technology
+### Technology
 
 AI Models: OpenAI GPT-4o for both text and image analysis
 Framework: FastAPI for high-performance API
