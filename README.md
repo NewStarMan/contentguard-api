@@ -39,6 +39,8 @@ image_payload = {"image_url": "https://example.com/image.jpg"}
 image_response = requests.post("https://api-url/api/moderate/image",
                               json=image_payload, headers=headers)
 
+```
+
 Security
 
 All API keys are securely hashed
