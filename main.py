@@ -586,6 +586,67 @@ async def moderate_image_with_openai(image_url: str) -> dict:
             "processing_time": processing_time,
             "model_used": "fallback"
         }
+    
+@app.post("/api/moderate/image", response_model=ModerationResult)
+async def moderate_image(
+    request: ImageModerationRequest,
+    req: Request,
+    auth_data: dict = Depends(verify_api_key)
+):
+    """Moderate image content for NSFW, violence, and inappropriate content"""
+    request_id = generate_request_id()
+    client_ip = auth_data["client_ip"]
+    user_agent = req.headers.get("User-Agent", "unknown")
+    
+    try:
+        # Perform image moderation using OpenAI
+        result = await moderate_image_with_openai(request.image_url)
+        
+        # Apply threshold
+        if result["confidence"] < request.severity_threshold:
+            result["is_safe"] = True
+        
+        # Generate recommendations
+        recommendations = []
+        if not result["is_safe"]:
+            recommendations.append("Image flagged for manual review")
+            if result["categories"].get("nsfw", 0) > 0.8:
+                recommendations.append("NSFW content detected - immediate removal recommended")
+            if result["categories"].get("violence", 0) > 0.7:
+                recommendations.append("Violent content detected")
+        
+        # Format response
+        moderation_result = ModerationResult(
+            request_id=request_id,
+            is_safe=result["is_safe"],
+            confidence=result["confidence"],
+            categories=result["categories"],
+            flagged_content=result.get("detected_content", []),
+            processing_time=result["processing_time"],
+            recommendations=recommendations
+        )
+        
+        # Log and update usage
+        update_usage(auth_data["key_hash"], success=True)
+        log_moderation(
+            auth_data["key_hash"],
+            request_id,
+            "image",
+            request.image_url,
+            result,
+            result["processing_time"],
+            client_ip,
+            user_agent
+        )
+        
+        return moderation_result
+        
+    except Exception as e:
+        # Log error and update error count
+        update_usage(auth_data["key_hash"], success=False)
+        log_security_event("IMAGE_MODERATION_ERROR", client_ip, user_agent, f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Image moderation service temporarily unavailable")
+    
 # API endpoints with enhanced security
 @app.get("/")
 async def root():
