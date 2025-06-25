@@ -864,7 +864,6 @@ bcrypt==4.1.2
 # Secure environment variables (.env):
 """
 OPENAI_API_KEY=your_openai_api_key_here
-GOOGLE_VISION_API_KEY=your_google_vision_key_here
 SECRET_KEY=your_very_secure_secret_key_here_minimum_32_chars
 ADMIN_PASSWORD_HASH=your_bcrypt_hashed_admin_password
 API_RATE_LIMIT=60
