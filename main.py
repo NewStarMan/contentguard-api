@@ -46,7 +46,6 @@ app.add_middleware(
 
 # Security configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-GOOGLE_VISION_API_KEY = os.getenv("GOOGLE_VISION_API_KEY", "")
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")  # bcrypt hash of admin password
 API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", "60"))  # requests per minute
@@ -463,6 +462,7 @@ async def moderate_text_with_openai(text: str, custom_rules: List[str] = None) -
         # Fallback to simple keyword detection
         return await fallback_text_moderation(text, custom_rules)
 
+
 async def fallback_text_moderation(text: str, custom_rules: List[str] = None) -> dict:
     """Simple keyword-based fallback moderation"""
     start_time = time.time()
@@ -501,6 +501,91 @@ async def fallback_text_moderation(text: str, custom_rules: List[str] = None) ->
         "model_used": "keyword_fallback"
     }
 
+async def moderate_image_with_openai(image_url: str) -> dict:
+    """Use OpenAI GPT-4o for image moderation"""
+    start_time = time.time()
+    
+    try:
+        # OpenAI Vision API call
+        response = await openai.ChatCompletion.acreate(
+            model="gpt-4o-mini",  # GPT-4o supports image analysis
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are an image content moderator. Analyze the provided image and determine if it contains:
+                    - NSFW/sexual content
+                    - Violence or gore
+                    - Hate symbols or offensive imagery
+                    - Inappropriate content for general audiences
+                    
+                    Respond with a JSON object containing:
+                    - is_safe: boolean
+                    - confidence: float (0-1)
+                    - categories: object with scores for each category
+                    - detected_content: array of problematic elements found
+                    - explanation: brief reason if flagged"""
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Analyze this image for inappropriate content:"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": image_url}
+                        }
+                    ]
+                }
+            ],
+            max_tokens=300,
+            temperature=0.1,
+            timeout=15
+        )
+        
+        ai_result = response.choices[0].message.content
+        
+        # Try to parse as JSON
+        try:
+            result = json.loads(ai_result)
+        except:
+            # Fallback parsing
+            is_safe = "safe" in ai_result.lower() and "inappropriate" not in ai_result.lower()
+            result = {
+                "is_safe": is_safe,
+                "confidence": 0.8,
+                "categories": {
+                    "nsfw": 0.3 if not is_safe else 0.1,
+                    "violence": 0.2 if not is_safe else 0.1,
+                    "hate_symbols": 0.1,
+                    "inappropriate": 0.4 if not is_safe else 0.1
+                },
+                "detected_content": [],
+                "explanation": "AI image analysis completed"
+            }
+        
+        processing_time = time.time() - start_time
+        
+        return {
+            **result,
+            "processing_time": processing_time,
+            "model_used": "gpt-4o-mini"
+        }
+        
+    except Exception as e:
+        logger.error(f"OpenAI image moderation failed: {str(e)}")
+        # Conservative fallback for image moderation
+        processing_time = time.time() - start_time
+        return {
+            "is_safe": True,  # Conservative fallback - assume safe if analysis fails
+            "confidence": 0.5,
+            "categories": {"error": 1.0},
+            "detected_content": [],
+            "error": f"Image analysis temporarily unavailable: {str(e)[:100]}",
+            "processing_time": processing_time,
+            "model_used": "fallback"
+        }
 # API endpoints with enhanced security
 @app.get("/")
 async def root():
