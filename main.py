@@ -509,22 +509,33 @@ async def moderate_image_with_openai(image_url: str) -> dict:
     try:
         # OpenAI Vision API call with new client
         response = await openai_client.chat.completions.create(
-            model="gpt-4o",  # GPT-4o supports image analysis
+            model="gpt-4o",
             messages=[
                 {
                     "role": "system",
-                    "content": """You are an image content moderator. Analyze the provided image and determine if it contains:
-                    - NSFW/sexual content
-                    - Violence or gore
-                    - Hate symbols or offensive imagery
-                    - Inappropriate content for general audiences
-                    
-                    Respond with a JSON object containing:
-                    - is_safe: boolean
-                    - confidence: float (0-1)
-                    - categories: object with scores for each category
-                    - detected_content: array of problematic elements found
-                    - explanation: brief reason if flagged"""
+                    "content": """You are an image content moderator. Analyze images for genuinely inappropriate content.
+
+Be reasonable and avoid false positives. Normal, everyday images (pets, people, landscapes, objects) should be marked as safe unless they contain:
+- Explicit sexual/nude content
+- Graphic violence, gore, or disturbing imagery  
+- Hate symbols or extremist imagery
+- Illegal content
+
+Respond with a JSON object:
+{
+    "is_safe": boolean (true for normal/appropriate content),
+    "confidence": float (0-1),
+    "categories": {
+        "nsfw": float (0-1, only high if explicitly sexual),
+        "violence": float (0-1, only high if graphic),
+        "hate_symbols": float (0-1),
+        "inappropriate": float (0-1, general inappropriateness)
+    },
+    "detected_content": array of specific issues found,
+    "explanation": brief reason only if flagged as unsafe
+}
+
+Remember: Most images are safe. Only flag genuinely problematic content."""
                 },
                 {
                     "role": "user",
@@ -550,20 +561,32 @@ async def moderate_image_with_openai(image_url: str) -> dict:
         # Try to parse as JSON
         try:
             result = json.loads(ai_result)
-        except:
-            # Fallback parsing
-            is_safe = "safe" in ai_result.lower() and "inappropriate" not in ai_result.lower()
+            # Ensure the response has all required fields
+            if "is_safe" not in result:
+                result["is_safe"] = True
+            if "confidence" not in result:
+                result["confidence"] = 0.8
+            if "categories" not in result:
+                result["categories"] = {}
+            if "detected_content" not in result:
+                result["detected_content"] = []
+                
+        except json.JSONDecodeError:
+            # If JSON parsing fails, analyze the text response
+            ai_lower = ai_result.lower()
+            is_safe = ("safe" in ai_lower or "appropriate" in ai_lower) and "unsafe" not in ai_lower
+            
             result = {
                 "is_safe": is_safe,
-                "confidence": 0.8,
+                "confidence": 0.7,
                 "categories": {
-                    "nsfw": 0.3 if not is_safe else 0.1,
-                    "violence": 0.2 if not is_safe else 0.1,
+                    "nsfw": 0.1,
+                    "violence": 0.1,
                     "hate_symbols": 0.1,
-                    "inappropriate": 0.4 if not is_safe else 0.1
+                    "inappropriate": 0.1
                 },
                 "detected_content": [],
-                "explanation": "AI image analysis completed"
+                "explanation": "Image analysis completed"
             }
         
         processing_time = time.time() - start_time
@@ -575,15 +598,22 @@ async def moderate_image_with_openai(image_url: str) -> dict:
         }
         
     except Exception as e:
-        logger.error(f"OpenAI image moderation failed: {str(e)}")
-        # Conservative fallback for image moderation
+        logger.error(f"OpenAI image moderation failed: {type(e).__name__}: {str(e)}")
         processing_time = time.time() - start_time
+        
+        # Return safe by default if API fails
         return {
-            "is_safe": True,  # Conservative fallback - assume safe if analysis fails
+            "is_safe": True,
             "confidence": 0.5,
-            "categories": {"error": 1.0},
+            "categories": {
+                "nsfw": 0.0,
+                "violence": 0.0,
+                "hate_symbols": 0.0,
+                "inappropriate": 0.0,
+                "error": 1.0
+            },
             "detected_content": [],
-            "error": f"Image analysis temporarily unavailable: {str(e)[:100]}",
+            "error": f"Image analysis failed: {str(e)[:100]}",
             "processing_time": processing_time,
             "model_used": "fallback"
         }
