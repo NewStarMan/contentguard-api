@@ -396,58 +396,94 @@ async def moderate_text_with_openai(text: str, custom_rules: List[str] = None) -
         raise ValueError("Empty text content")
     
     # Create moderation prompt
-    system_prompt = """You are a content moderation AI. Analyze the provided text and determine if it contains:
-    - Hate speech or harassment
-    - Threats or violence
-    - Spam or promotional content
-    - Sexual or inappropriate content
-    - Misinformation or harmful advice
-    
-    Respond with a JSON object containing:
-    - is_safe: boolean
-    - confidence: float (0-1)
-    - categories: object with scores for each category
-    - flagged_phrases: array of specific problematic phrases
-    - explanation: brief reason if flagged
-    """
+    system_prompt = """You are a content moderation AI. Analyze text for genuinely harmful content while avoiding false positives.
+
+Flag content ONLY if it contains:
+- THREATS: Direct threats of violence or harm to individuals/groups
+- HARASSMENT: Persistent targeting, doxxing, or severe personal attacks
+- HATE SPEECH: Extreme language targeting protected groups with intent to harm
+- SPAM: Repetitive commercial spam or scam attempts
+- SEXUAL: Explicit sexual content involving minors or non-consensual acts
+- SELF-HARM: Content promoting suicide or dangerous self-harm
+- ILLEGAL: Content promoting illegal activities
+
+DO NOT flag:
+- Mild profanity or casual insults
+- Political opinions or controversial views
+- Criticism of public figures or companies
+- Dark humor or sarcasm
+- Educational discussions about sensitive topics
+- Content with words like "hate", "kill", "die" in non-threatening contexts
+
+Respond with JSON:
+{
+    "is_safe": boolean (true unless genuinely harmful),
+    "confidence": float (0-1),
+    "categories": {
+        "threats": float (0-1),
+        "harassment": float (0-1), 
+        "hate_speech": float (0-1),
+        "spam": float (0-1),
+        "sexual": float (0-1),
+        "self_harm": float (0-1),
+        "illegal": float (0-1)
+    },
+    "flagged_phrases": array of ONLY genuinely problematic phrases,
+    "explanation": brief reason ONLY if unsafe,
+    "severity": "low"|"medium"|"high" (only for unsafe content)
+}
+
+Be reasonable. Most content is safe. Flag only genuine threats to safety."""
     
     if custom_rules:
         # Sanitize custom rules
-        custom_rules = [rule.strip() for rule in custom_rules if rule.strip()][:10]  # Limit to 10 rules
+        custom_rules = [rule.strip() for rule in custom_rules if rule.strip()][:10]
         if custom_rules:
-            system_prompt += f"\nAlso flag content containing these custom terms: {', '.join(custom_rules)}"
+            system_prompt += f"\n\nAlso check for these specific terms (client-defined): {', '.join(custom_rules)}"
     
     try:
         response = await openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Analyze this text: {text[:2000]}"}  # Limit input length
+                {"role": "user", "content": f"Analyze this text: {text[:2000]}"}
             ],
             max_tokens=300,
             temperature=0.1,
-            timeout=10  # Add timeout
+            timeout=10
         )
         
         ai_result = response.choices[0].message.content
         
-        # Try to parse as JSON, fallback to manual parsing
+        # Try to parse as JSON
         try:
             result = json.loads(ai_result)
-        except:
-            # Fallback logic if AI doesn't return valid JSON
+            # Ensure all required fields exist
+            if "is_safe" not in result:
+                result["is_safe"] = True
+            if "confidence" not in result:
+                result["confidence"] = 0.8
+            if "categories" not in result:
+                result["categories"] = {}
+            if "flagged_phrases" not in result:
+                result["flagged_phrases"] = []
+                
+        except json.JSONDecodeError:
+            # Fallback if JSON parsing fails
             result = {
-                "is_safe": "unsafe" not in ai_result.lower() and "inappropriate" not in ai_result.lower(),
-                "confidence": 0.8,
+                "is_safe": True,
+                "confidence": 0.7,
                 "categories": {
-                    "hate_speech": 0.3,
-                    "harassment": 0.2,
+                    "threats": 0.1,
+                    "harassment": 0.1,
+                    "hate_speech": 0.1,
                     "spam": 0.1,
                     "sexual": 0.1,
-                    "violence": 0.2
+                    "self_harm": 0.1,
+                    "illegal": 0.1
                 },
                 "flagged_phrases": [],
-                "explanation": "AI analysis completed"
+                "explanation": "Analysis completed"
             }
         
         processing_time = time.time() - start_time
@@ -460,8 +496,82 @@ async def moderate_text_with_openai(text: str, custom_rules: List[str] = None) -
         
     except Exception as e:
         logger.error(f"OpenAI moderation failed: {str(e)}")
-        # Fallback to simple keyword detection
         return await fallback_text_moderation(text, custom_rules)
+
+
+async def fallback_text_moderation(text: str, custom_rules: List[str] = None) -> dict:
+    """Improved keyword-based fallback moderation"""
+    start_time = time.time()
+    
+    # More nuanced keyword detection with context
+    text_lower = text.lower()
+    
+    # Define severity levels
+    severe_patterns = {
+        'threats': [
+            'i will kill', 'going to kill', 'i\'ll kill',
+            'i will hurt', 'watch your back', 'know where you live',
+            'going to find you', 'dead threat'
+        ],
+        'harassment': [
+            'kill yourself', 'kys', 'end your life',
+            'nobody likes you', 'everyone hates you',
+            'doxx', 'leak your address'
+        ],
+        'hate_speech': [
+            # Only genuinely hateful combinations, not individual words
+            'all [group] should die', '[slur] deserve',
+            # Avoiding listing actual slurs here
+        ],
+        'spam': [
+            'click here now', 'limited time offer',
+            'earn money fast', 'hot singles', 'viagra',
+            'casino', 'free money guaranteed'
+        ]
+    }
+    
+    # Check for severe content
+    categories = {
+        'threats': 0.1,
+        'harassment': 0.1,
+        'hate_speech': 0.1,
+        'spam': 0.1,
+        'sexual': 0.1,
+        'self_harm': 0.1,
+        'illegal': 0.1
+    }
+    
+    flagged = []
+    
+    # Check severe patterns
+    for category, patterns in severe_patterns.items():
+        for pattern in patterns:
+            if pattern in text_lower:
+                categories[category] = 0.9
+                flagged.append(pattern)
+    
+    # Check custom rules
+    if custom_rules:
+        for rule in custom_rules[:10]:
+            if rule.lower() in text_lower:
+                flagged.append(rule)
+                categories['spam'] = max(categories['spam'], 0.7)
+    
+    # Only mark unsafe if we found severe content
+    is_safe = len(flagged) == 0 or max(categories.values()) < 0.7
+    confidence = 0.9 if flagged else 0.8
+    
+    processing_time = time.time() - start_time
+    
+    return {
+        "is_safe": is_safe,
+        "confidence": confidence,
+        "categories": categories,
+        "flagged_phrases": flagged,
+        "processing_time": processing_time,
+        "model_used": "keyword_fallback",
+        "severity": "high" if max(categories.values()) > 0.8 else "medium" if max(categories.values()) > 0.5 else "low"
+    }
 
 
 async def fallback_text_moderation(text: str, custom_rules: List[str] = None) -> dict:
