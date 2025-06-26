@@ -6,7 +6,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any
-import openai
+from openai import AsyncOpenAI
 import requests
 import asyncio
 import hashlib
@@ -54,7 +54,8 @@ API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", "60"))  # requests per minute
 if not all([OPENAI_API_KEY, SECRET_KEY]):
     raise ValueError("Missing required environment variables: OPENAI_API_KEY, SECRET_KEY")
 
-openai.api_key = OPENAI_API_KEY
+# Initialize OpenAI client with new v1.0+ syntax
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # Rate limiting storage (in production, use Redis)
 rate_limit_storage = defaultdict(list)
@@ -385,7 +386,7 @@ def log_moderation(key_hash: str, request_id: str, content_type: str, content: s
     conn.commit()
     conn.close()
 
-# AI Moderation Functions (same as before, with added security)
+# AI Moderation Functions with new OpenAI client
 async def moderate_text_with_openai(text: str, custom_rules: List[str] = None) -> dict:
     start_time = time.time()
     
@@ -417,7 +418,7 @@ async def moderate_text_with_openai(text: str, custom_rules: List[str] = None) -
             system_prompt += f"\nAlso flag content containing these custom terms: {', '.join(custom_rules)}"
     
     try:
-        response = await openai.ChatCompletion.acreate(
+        response = await openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -506,8 +507,8 @@ async def moderate_image_with_openai(image_url: str) -> dict:
     start_time = time.time()
     
     try:
-        # OpenAI Vision API call
-        response = await openai.ChatCompletion.acreate(
+        # OpenAI Vision API call with new client
+        response = await openai_client.chat.completions.create(
             model="gpt-4o",  # GPT-4o supports image analysis
             messages=[
                 {
@@ -849,22 +850,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
-# Enhanced requirements.txt:
-"""
-fastapi==0.104.1
-uvicorn==0.24.0
-openai==1.3.3
-requests==2.31.0
-pydantic[email]==2.5.0
-python-multipart==0.0.6
-bcrypt==4.1.2
-"""
-
-# Secure environment variables (.env):
-"""
-OPENAI_API_KEY=your_openai_api_key_here
-SECRET_KEY=your_very_secure_secret_key_here_minimum_32_chars
-ADMIN_PASSWORD_HASH=your_bcrypt_hashed_admin_password
-API_RATE_LIMIT=60
-"""
