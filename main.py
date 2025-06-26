@@ -418,7 +418,7 @@ async def moderate_text_with_openai(text: str, custom_rules: List[str] = None) -
     
     try:
         response = await openai.ChatCompletion.acreate(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Analyze this text: {text[:2000]}"}  # Limit input length
@@ -454,7 +454,7 @@ async def moderate_text_with_openai(text: str, custom_rules: List[str] = None) -
         return {
             **result,
             "processing_time": processing_time,
-            "model_used": "gpt-4o-mini"
+            "model_used": "gpt-4o"
         }
         
     except Exception as e:
@@ -508,7 +508,7 @@ async def moderate_image_with_openai(image_url: str) -> dict:
     try:
         # OpenAI Vision API call
         response = await openai.ChatCompletion.acreate(
-            model="gpt-4o-mini",  # GPT-4o supports image analysis
+            model="gpt-4o",  # GPT-4o supports image analysis
             messages=[
                 {
                     "role": "system",
@@ -570,7 +570,7 @@ async def moderate_image_with_openai(image_url: str) -> dict:
         return {
             **result,
             "processing_time": processing_time,
-            "model_used": "gpt-4o-mini"
+            "model_used": "gpt-4o"
         }
         
     except Exception as e:
