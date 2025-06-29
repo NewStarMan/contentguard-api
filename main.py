@@ -1,4 +1,4 @@
-# Secure Content Moderation API - Production Ready
+# Secure Content Moderation API - Production Ready with RapidAPI Support
 # File: main.py
 
 from fastapi import FastAPI, HTTPException, Depends, Request, Header
@@ -35,19 +35,26 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS middleware
+# CORS middleware - Updated to support RapidAPI
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://rapidapi.com", "https://*.rapidapi.com"],  # Only allow RapidAPI
+    allow_origins=[
+        "https://rapidapi.com",
+        "https://*.rapidapi.com",
+        "https://rapidapi.p.rapidapi.com",
+        "*"  # Allows testing - you can restrict this later
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 # Security configuration
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-SECRET_KEY = os.getenv("SECRET_KEY", "")
-ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")  # bcrypt hash of admin password
+# TODO: Add these to your Railway environment variables:
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # Your OpenAI API key
+SECRET_KEY = os.getenv("SECRET_KEY", "")  # Generate a random 32+ character string
+ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")  # BCrypt hash of your admin password
+RAPIDAPI_PROXY_SECRET = os.getenv("RAPIDAPI_PROXY_SECRET", "")  # Get this from RapidAPI dashboard
 API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", "60"))  # requests per minute
 
 # Validate required environment variables
@@ -335,6 +342,72 @@ async def verify_api_key(
         "client_ip": client_ip
     }
 
+# NEW: RapidAPI authentication support
+async def verify_rapidapi_or_direct(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
+    x_rapidapi_proxy_secret: Optional[str] = Header(None),
+    x_rapidapi_user: Optional[str] = Header(None),
+    x_rapidapi_subscription: Optional[str] = Header(None)
+):
+    """Verify request from either RapidAPI or direct API key"""
+    
+    client_ip = get_client_ip(request)
+    user_agent = request.headers.get("User-Agent", "unknown")
+    
+    # Check if request is from RapidAPI
+    if x_rapidapi_proxy_secret and x_rapidapi_user:
+        # Verify the proxy secret
+        if RAPIDAPI_PROXY_SECRET and x_rapidapi_proxy_secret != RAPIDAPI_PROXY_SECRET:
+            log_security_event("INVALID_RAPIDAPI_SECRET", client_ip, user_agent, "Invalid RapidAPI proxy secret")
+            raise HTTPException(status_code=401, detail="Invalid RapidAPI proxy secret")
+        
+        # Map RapidAPI subscription tiers to your internal plans
+        subscription_to_plan = {
+            "BASIC": {"plan": "free", "quota": 100, "rate_limit": 10},
+            "PRO": {"plan": "starter", "quota": 5000, "rate_limit": 60},
+            "ULTRA": {"plan": "pro", "quota": 50000, "rate_limit": 300},
+            "MEGA": {"plan": "business", "quota": 250000, "rate_limit": 1000},
+            "CUSTOM": {"plan": "enterprise", "quota": 999999, "rate_limit": 2000}
+        }
+        
+        # Get plan details
+        plan_info = subscription_to_plan.get(
+            x_rapidapi_subscription or "BASIC",
+            subscription_to_plan["BASIC"]
+        )
+        
+        # Check RapidAPI-specific rate limiting
+        if not check_rate_limit(f"rapid_{x_rapidapi_user}", plan_info["rate_limit"]):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        
+        # Create consistent user identification
+        rapid_user_id = f"rapid_{x_rapidapi_user}"
+        
+        # Log RapidAPI usage (optional - for analytics)
+        logger.info(f"RapidAPI request from user: {x_rapidapi_user}, subscription: {x_rapidapi_subscription}")
+        
+        return {
+            "key_hash": hashlib.sha256(rapid_user_id.encode()).hexdigest(),
+            "email": f"{x_rapidapi_user}@rapidapi.com",
+            "plan": plan_info["plan"],
+            "remaining_quota": plan_info["quota"],  # RapidAPI handles actual quotas
+            "client_ip": client_ip,
+            "is_rapidapi": True,
+            "rapidapi_user": x_rapidapi_user,
+            "rapidapi_subscription": x_rapidapi_subscription
+        }
+    
+    # Fall back to direct API key authentication
+    elif credentials:
+        return await verify_api_key(credentials, request)
+    
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required. Provide either API key or RapidAPI headers."
+        )
+
 # Admin authentication
 def verify_admin_password(password: str) -> bool:
     """Verify admin password"""
@@ -386,7 +459,7 @@ def log_moderation(key_hash: str, request_id: str, content_type: str, content: s
     conn.commit()
     conn.close()
 
-# AI Moderation Functions with new OpenAI client
+# AI Moderation Functions with improved text moderation
 async def moderate_text_with_openai(text: str, custom_rules: List[str] = None) -> dict:
     start_time = time.time()
     
@@ -573,45 +646,6 @@ async def fallback_text_moderation(text: str, custom_rules: List[str] = None) ->
         "severity": "high" if max(categories.values()) > 0.8 else "medium" if max(categories.values()) > 0.5 else "low"
     }
 
-
-async def fallback_text_moderation(text: str, custom_rules: List[str] = None) -> dict:
-    """Simple keyword-based fallback moderation"""
-    start_time = time.time()
-    
-    # Basic toxic keywords (you'd expand this list)
-    toxic_keywords = [
-        'hate', 'kill', 'die', 'stupid', 'idiot', 'scam', 'spam',
-        'buy now', 'click here', 'free money', 'urgent'
-    ]
-    
-    if custom_rules:
-        toxic_keywords.extend(custom_rules[:10])  # Limit custom rules
-    
-    text_lower = text.lower()
-    flagged = []
-    
-    for keyword in toxic_keywords:
-        if keyword.lower() in text_lower:
-            flagged.append(keyword)
-    
-    is_safe = len(flagged) == 0
-    confidence = 0.9 if flagged else 0.7
-    
-    processing_time = time.time() - start_time
-    
-    return {
-        "is_safe": is_safe,
-        "confidence": confidence,
-        "categories": {
-            "hate_speech": 0.8 if any(word in flagged for word in ['hate', 'kill', 'die']) else 0.1,
-            "spam": 0.9 if any(word in flagged for word in ['buy now', 'click here', 'free money']) else 0.1,
-            "general_toxicity": 0.7 if flagged else 0.1
-        },
-        "flagged_phrases": flagged,
-        "processing_time": processing_time,
-        "model_used": "keyword_fallback"
-    }
-
 async def moderate_image_with_openai(image_url: str) -> dict:
     """Use OpenAI GPT-4o for image moderation"""
     start_time = time.time()
@@ -732,7 +766,7 @@ Remember: Most images are safe. Only flag genuinely problematic content."""
 async def moderate_image(
     request: ImageModerationRequest,
     req: Request,
-    auth_data: dict = Depends(verify_api_key)
+    auth_data: dict = Depends(verify_rapidapi_or_direct)  # CHANGED TO SUPPORT RAPIDAPI
 ):
     """Moderate image content for NSFW, violence, and inappropriate content"""
     request_id = generate_request_id()
@@ -767,8 +801,10 @@ async def moderate_image(
             recommendations=recommendations
         )
         
-        # Log and update usage
-        update_usage(auth_data["key_hash"], success=True)
+        # Log and update usage (skip for RapidAPI users as they handle their own quotas)
+        if not auth_data.get("is_rapidapi"):
+            update_usage(auth_data["key_hash"], success=True)
+        
         log_moderation(
             auth_data["key_hash"],
             request_id,
@@ -784,7 +820,8 @@ async def moderate_image(
         
     except Exception as e:
         # Log error and update error count
-        update_usage(auth_data["key_hash"], success=False)
+        if not auth_data.get("is_rapidapi"):
+            update_usage(auth_data["key_hash"], success=False)
         log_security_event("IMAGE_MODERATION_ERROR", client_ip, user_agent, f"Error: {str(e)}")
         raise HTTPException(status_code=500, detail="Image moderation service temporarily unavailable")
     
@@ -795,7 +832,12 @@ async def root():
         "message": "ContentGuard API - Secure AI Content Moderation",
         "version": "1.0.0",
         "docs": "/docs",
-        "status": "operational"
+        "status": "operational",
+        "endpoints": [
+            {"method": "POST", "path": "/api/moderate/text", "description": "Moderate text content"},
+            {"method": "POST", "path": "/api/moderate/image", "description": "Moderate image content"},
+            {"method": "GET", "path": "/api/usage", "description": "Get usage statistics"}
+        ]
     }
 
 @app.post("/admin/api-key/generate")
@@ -854,7 +896,7 @@ async def admin_generate_api_key(
 async def moderate_text(
     request: TextModerationRequest,
     req: Request,
-    auth_data: dict = Depends(verify_api_key)
+    auth_data: dict = Depends(verify_rapidapi_or_direct)  # CHANGED TO SUPPORT RAPIDAPI
 ):
     """Moderate text content for toxicity, spam, and inappropriate content"""
     request_id = generate_request_id()
@@ -892,8 +934,10 @@ async def moderate_text(
             recommendations=recommendations
         )
         
-        # Log and update usage
-        update_usage(auth_data["key_hash"], success=True)
+        # Log and update usage (skip for RapidAPI users)
+        if not auth_data.get("is_rapidapi"):
+            update_usage(auth_data["key_hash"], success=True)
+        
         log_moderation(
             auth_data["key_hash"],
             request_id,
@@ -909,16 +953,26 @@ async def moderate_text(
         
     except Exception as e:
         # Log error and update error count
-        update_usage(auth_data["key_hash"], success=False)
+        if not auth_data.get("is_rapidapi"):
+            update_usage(auth_data["key_hash"], success=False)
         log_security_event("MODERATION_ERROR", client_ip, user_agent, f"Error: {str(e)}")
         raise HTTPException(status_code=500, detail="Moderation service temporarily unavailable")
 
 @app.get("/api/usage")
 async def get_usage_stats(
     req: Request,
-    auth_data: dict = Depends(verify_api_key)
+    auth_data: dict = Depends(verify_rapidapi_or_direct)  # CHANGED TO SUPPORT RAPIDAPI
 ):
     """Get current usage statistics for the API key"""
+    # RapidAPI users don't have usage stats in our database
+    if auth_data.get("is_rapidapi"):
+        return {
+            "message": "Usage statistics are managed by RapidAPI",
+            "plan": auth_data["plan"],
+            "rapidapi_user": auth_data.get("rapidapi_user"),
+            "subscription": auth_data.get("rapidapi_subscription")
+        }
+    
     conn = get_db_connection()
     cursor = conn.cursor()
     
